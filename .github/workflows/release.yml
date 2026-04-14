@@ -60,7 +60,6 @@ jobs:
 
   publish-npm:
     needs: build
-    if: ${{ secrets.NPM_TOKEN != '' }}
     runs-on: ubuntu-latest
     permissions:
       contents: read
@@ -87,6 +86,19 @@ jobs:
 
       - run: pnpm release:smoke
 
+      - name: Check npm token presence
+        id: npm_token
+        shell: bash
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+        run: |
+          if [ -n "$NODE_AUTH_TOKEN" ]; then
+            echo "present=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "present=false" >> "$GITHUB_OUTPUT"
+            echo "NPM_TOKEN is not configured; skipping npm publish."
+          fi
+
       - name: Resolve package version
         id: package_version
         shell: bash
@@ -106,6 +118,6 @@ jobs:
           fi
 
       - run: pnpm publish --access public --no-git-checks
-        if: steps.npm_version.outputs.exists == 'false'
+        if: steps.npm_token.outputs.present == 'true' && steps.npm_version.outputs.exists == 'false'
         env:
           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
