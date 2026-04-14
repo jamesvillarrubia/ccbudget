@@ -87,6 +87,25 @@ jobs:
 
       - run: pnpm release:smoke
 
+      - name: Resolve package version
+        id: package_version
+        shell: bash
+        run: |
+          VERSION="$(node -p "JSON.parse(require('node:fs').readFileSync('package.json', 'utf8')).version")"
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+
+      - name: Check npm version availability
+        id: npm_version
+        shell: bash
+        run: |
+          if npm view "ccbudget@${{ steps.package_version.outputs.version }}" version >/dev/null 2>&1; then
+            echo "exists=true" >> "$GITHUB_OUTPUT"
+            echo "Package version ccbudget@${{ steps.package_version.outputs.version }} already exists; skipping publish."
+          else
+            echo "exists=false" >> "$GITHUB_OUTPUT"
+          fi
+
       - run: pnpm publish --access public --no-git-checks
+        if: steps.npm_version.outputs.exists == 'false'
         env:
           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
