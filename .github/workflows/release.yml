@@ -1,0 +1,92 @@
+name: release
+
+on:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 10
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+
+      - run: pnpm install --frozen-lockfile
+
+      - run: pnpm test
+
+      - run: pnpm typecheck
+
+      - run: pnpm build
+
+      - run: pnpm release:smoke
+
+      - run: pnpm build:sea
+
+      - run: pnpm release:smoke:sea
+
+      - name: Rename release binary
+        shell: bash
+        run: |
+          node --input-type=module -e "
+          import { renameSync, existsSync } from 'node:fs';
+          import { join } from 'node:path';
+          const ext = process.platform === 'win32' ? '.exe' : '';
+          const src = join('release', 'ccbudget' + ext);
+          const dest = join('release', 'ccbudget-' + process.platform + '-' + process.arch + ext);
+          if (!existsSync(src)) throw new Error('missing ' + src);
+          renameSync(src, dest);
+          "
+
+      - uses: softprops/action-gh-release@v2
+        with:
+          files: release/ccbudget-*
+
+  publish-npm:
+    needs: build
+    if: ${{ secrets.NPM_TOKEN != '' }}
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 10
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+          registry-url: https://registry.npmjs.org
+
+      - run: pnpm install --frozen-lockfile
+
+      - run: pnpm test
+
+      - run: pnpm typecheck
+
+      - run: pnpm build
+
+      - run: pnpm release:smoke
+
+      - run: pnpm publish --access public --no-git-checks
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}

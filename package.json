@@ -1,13 +1,45 @@
 {
-  "name": "cc-rate-estimator",
-  "version": "0.0.0",
-  "private": true,
+  "name": "ccbudget",
+  "version": "0.1.0",
+  "description": "CLI-first Claude usage budget advisor and decision engine (ccbudget).",
+  "private": false,
+  "license": "MIT",
   "type": "module",
+  "homepage": "https://github.com/jamesvillarrubia/ccbudget#readme",
+  "bugs": {
+    "url": "https://github.com/jamesvillarrubia/ccbudget/issues"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/jamesvillarrubia/ccbudget.git"
+  },
+  "keywords": [
+    "anthropic",
+    "budget",
+    "ccbudget",
+    "claude",
+    "cli",
+    "usage"
+  ],
+  "engines": {
+    "node": ">=22"
+  },
   "bin": {
     "ccbudget": "dist/cli.js"
   },
+  "files": [
+    "dist/**/*.js",
+    "LICENSE",
+    "README.md",
+    "integrations/claude/commands/budget.md"
+  ],
   "scripts": {
     "build": "tsup",
+    "build:sea": "node scripts/build-sea.mjs",
+    "pack:dry-run": "pnpm pack --pack-destination release",
+    "prepublishOnly": "pnpm test && pnpm typecheck && pnpm build && pnpm release:smoke",
+    "release:smoke": "node dist/cli.js advisor now --json",
+    "release:smoke:sea": "node --input-type=module -e \"import { execFileSync } from 'node:child_process'; import { resolve } from 'node:path'; const ext = process.platform === 'win32' ? '.exe' : ''; execFileSync(resolve('release', 'ccbudget' + ext), ['advisor', 'now', '--json'], { stdio: 'inherit' });\"",
     "snapshot": "tsx src/cli.ts snapshot",
     "baseline": "tsx src/cli.ts baseline --output-dir baselines --window-minutes 300",
     "pulse": "tsx src/cli.ts pulse --output-dir baselines --window-minutes 300",
@@ -23,6 +55,7 @@
   },
   "devDependencies": {
     "@types/node": "^25.5.2",
+    "postject": "1.0.0-alpha.6",
     "tsup": "^8.5.0",
     "tsx": "^4.21.0",
     "typescript": "^6.0.2",

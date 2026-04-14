@@ -103,3 +103,18 @@ export interface PricingBaseline {
   sampleCount: number;
   isPeak: boolean;
 }
+
+export type {
+  CandidatePath,
+  BindingConstraint,
+  CapabilityTier,
+  DecisionResult,
+  FailureMode,
+  ModelId,
+  ModelState,
+  ObservedState,
+  ResetSummary,
+  SpendPolicy,
+  WorkloadClass,
+  WorkloadInference,
+} from "./decision-engine/types.js";

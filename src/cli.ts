@@ -2,9 +2,13 @@ import { access, mkdir, readFile, readdir, writeFile } from "node:fs/promises";
 import { dirname, join } from "node:path";
 import { homedir } from "node:os";
 import { setTimeout as sleep } from "node:timers/promises";
+import { readSpendPolicyFromEnv } from "./config.js";
 import { collectSnapshotEvent, readHookPayload } from "./collectors.js";
+import { buildDecisionResult } from "./decision-engine/index.js";
+import { toLegacyRecommendation } from "./decision-engine/legacy-adapter.js";
 import { buildRecommendation, estimateModelMix } from "./estimator.js";
 import { isPeakHour, normalizeToOpusTpp } from "./pricing.js";
+import { buildAdvisorJsonPayload, formatDecisionSummary } from "./presentation.js";
 import { runCommand } from "./shell.js";
 import {
   appendPricingHistory,
@@ -19,8 +23,7 @@ import {
   getSnapshotFilePath,
   releaseLock,
 } from "./storage.js";
-import type { Recommendation, SnapshotEvent } from "./types.js";
-import type { UsageAccountingSnapshot } from "./types.js";
+import type { SnapshotEvent, UsageAccountingSnapshot } from "./types.js";
 
 // ---------------------------------------------------------------------------
 // Arg parsing
@@ -108,7 +111,9 @@ async function runAdvisorNow(args: ParsedArgs): Promise<void> {
   }
   const snapshots = await readRecentSnapshotsFromState(Math.max(windowMinutes, 180));
   const baseline = await readPricingBaseline();
-  const recommendation = buildRecommendation(snapshots, windowMinutes, baseline);
+  const policy = readSpendPolicyFromEnv();
+  const decision = buildDecisionResult(snapshots, policy);
+  const recommendation = toLegacyRecommendation(decision, { snapshots, windowMinutes, baseline });
 
   if (
     recommendation.currentTokensPerPct != null &&
@@ -149,166 +154,23 @@ async function runAdvisorNow(args: ParsedArgs): Promise<void> {
         message,
         confidence: recommendation.confidence,
         recommendation: recommendation.recommendedModel,
+        decision,
       })}\n`,
     );
     return;
   }
 
   if (args.flags.has("json")) {
-    process.stdout.write(`${JSON.stringify({ ok: true, windowMinutes, recommendation }, null, 2)}\n`);
+    process.stdout.write(
+      `${JSON.stringify(buildAdvisorJsonPayload({ windowMinutes, decision, recommendation }), null, 2)}\n`,
+    );
     return;
   }
 
-  printAdvisorHuman(recommendation);
-}
-
-// ---------------------------------------------------------------------------
-// Human-readable advisor output
-// ---------------------------------------------------------------------------
-
-function progressBar(pct: number, width = 20): string {
-  const filled = Math.round((pct / 100) * width);
-  return "\u2588".repeat(filled) + "\u2591".repeat(width - filled);
-}
-
-const SESSION_WINDOW_HRS = 5;
-
-function fmtTokens(n: number): string {
-  if (n >= 1_000_000) return `${(n / 1_000_000).toFixed(1)}M`;
-  if (n >= 1_000) return `${(n / 1_000).toFixed(0)}K`;
-  return `${n.toFixed(0)}`;
-}
-
-function fmtDuration(hours: number): string {
-  if (hours >= 24) return `${(hours / 24).toFixed(1)}d`;
-  if (hours >= 1) return `${hours.toFixed(1)}h`;
-  return `${Math.round(hours * 60)}min`;
-}
-
-function printAdvisorHuman(rec: Recommendation): void {
-  const w = process.stdout.columns || 60;
-  const line = "\u2500".repeat(Math.min(w, 52));
-  const out = (s: string) => process.stdout.write(s + "\n");
-
-  out("");
-  const peakLabel = rec.isPeak ? " [PEAK]" : " [off-peak]";
-  out(`  Claude Budget Advisor${peakLabel}`);
-  out(`  ${line}`);
-
-  if (rec.sessionPct != null) {
-    out(`  Session    ${progressBar(rec.sessionPct)}  ${Math.round(rec.sessionPct)}%`);
-  }
-
-  if (rec.sessionBurnPctPerHour != null && rec.sessionBurnPctPerHour > 0) {
-    out(`  Burn rate  ${rec.sessionBurnPctPerHour.toFixed(1)}%/hr`);
-  } else {
-    out("  Burn rate  idle");
-  }
-
-  if (rec.windowResetsInMinutes != null) {
-    const hrs = rec.windowResetsInMinutes / 60;
-    out(`  Resets in  ${hrs >= 1 ? `${hrs.toFixed(1)}h` : `${rec.windowResetsInMinutes}min`}`);
-  }
-
-  if (rec.projectedEndPct != null) {
-    out(`  Projected  ${rec.projectedEndPct.toFixed(0)}% at window end`);
-  }
-
-  out("");
-
-  if (rec.willHitLimit) {
-    const label = rec.recommendedModel === "sonnet" ? "USE SONNET" : "BUDGET IS TIGHT";
-    out(`  >>> ${label} <<<`);
-  } else if (rec.sessionBurnPctPerHour != null && rec.sessionBurnPctPerHour > 0) {
-    const label = rec.recommendedModel === "opus" ? "OPUS IS FINE" : "EITHER MODEL OK";
-    out(`  ${label}`);
-  } else {
-    out("  IDLE");
-  }
-
-  out("");
-
-  // Pricing vs baseline (Opus-normalized, peak/off-peak bucketed)
-  if (rec.currentTokensPerPct != null) {
-    out(`  Budget     ${fmtTokens(rec.currentTokensPerPct)} tokens per 1%`);
-    if (rec.baselineTokensPerPct != null) {
-      const bucketLabel = rec.isPeak ? "peak" : "off-peak";
-      out(`             Your ${bucketLabel} avg: ${fmtTokens(rec.baselineTokensPerPct)} tokens per 1%`);
-    }
-    if (rec.pricingVsBaseline != null) {
-      const pct = Math.abs(rec.pricingVsBaseline).toFixed(0);
-      if (rec.pricingVsBaseline > 0) {
-        out(`             Anthropic pricing ${pct}% higher than your ${rec.isPeak ? "peak" : "off-peak"} norm`);
-      } else {
-        out(`             Anthropic pricing ${pct}% lower than your ${rec.isPeak ? "peak" : "off-peak"} norm`);
-      }
-    }
-    out("");
-  }
-
-  // Sonnet weekly cap — with timing based on weekly average
-  if (rec.weeklySonnetPct != null) {
-    const warn = !rec.sonnetCapAvailable ? " \u26A0 NEAR CAP" : "";
-    out(`  Sonnet     ${progressBar(rec.weeklySonnetPct)}  ${Math.round(rec.weeklySonnetPct)}% weekly${warn}`);
-
-    // Show rates: prefer avg (includes idle hours), note instantaneous if different
-    const avgRate = rec.weeklySonnetAvgBurnPctPerHour;
-    const instantRate = rec.weeklySonnetBurnPctPerHour;
-    if (avgRate != null && avgRate > 0) {
-      let rateLabel = `${avgRate.toFixed(1)}%/hr avg this week`;
-      if (instantRate != null && instantRate > 0 && Math.abs(instantRate - avgRate) / avgRate > 0.2) {
-        rateLabel += ` (${instantRate.toFixed(1)}%/hr right now)`;
-      }
-      out(`             ${rateLabel}`);
-    } else if (instantRate != null && instantRate > 0) {
-      out(`             ${instantRate.toFixed(1)}%/hr (current session only)`);
-    }
-
-    // Use the best rate for cap timing: avg > instantaneous
-    const projRate = avgRate ?? instantRate;
-    const hoursToSonnetCap =
-      projRate != null && projRate > 0 && rec.weeklySonnetPct < 100
-        ? (100 - rec.weeklySonnetPct) / projRate
-        : undefined;
-
-    if (rec.weeklySonnetHitsLimit && hoursToSonnetCap != null) {
-      const beforeReset = rec.weeklySonnetResetsInHours != null
-        ? ` (${fmtDuration(rec.weeklySonnetResetsInHours - hoursToSonnetCap)} before reset)`
-        : "";
-      out(`             \u2192 hits cap in ~${fmtDuration(hoursToSonnetCap)}${beforeReset}`);
-    } else if (rec.weeklySonnetProjectedEndPct != null) {
-      out(`             Projected ${Math.round(rec.weeklySonnetProjectedEndPct)}% at reset`);
-    }
-
-    if (rec.weeklySonnetResetsInHours != null) {
-      out(`             resets in ${fmtDuration(rec.weeklySonnetResetsInHours)}`);
-    }
-  }
-
-  out("");
-
-  // Model survival comparison
-  if (rec.willHitLimit && rec.sonnetEquivBurnRate != null && rec.sonnetEquivBurnRate > 0) {
-    if (rec.sonnetCapAvailable) {
-      const remainHrs = (rec.windowResetsInMinutes ?? SESSION_WINDOW_HRS * 60) / 60;
-      const sonnetEndPct = Math.min(100, (rec.sessionPct ?? 0) + rec.sonnetEquivBurnRate * remainHrs);
-      out(`  On Sonnet  \u2192 ~${sonnetEndPct.toFixed(0)}% session at window end${sonnetEndPct < 100 ? " (safe)" : ""}`);
-    } else {
-      out(`  On Sonnet  \u2192 NOT VIABLE (weekly cap at ${Math.round(rec.weeklySonnetPct ?? 0)}%)`);
-    }
-  }
-
-  out("");
-
-  if (rec.dataPoints != null) {
-    let meta = `  ${rec.dataPoints} samples`;
-    if (rec.elapsedMinutes != null) meta += ` over ${rec.elapsedMinutes}min`;
-    meta += ` (confidence: ${(rec.confidence * 100).toFixed(0)}%)`;
-    out(meta);
-  }
-
-  out(`  ${line}`);
-  out("");
+  const peakLabel = recommendation.isPeak ? " [PEAK]" : " [off-peak]";
+  process.stdout.write("\n");
+  process.stdout.write(`  Claude Budget Advisor${peakLabel}\n`);
+  process.stdout.write(`${formatDecisionSummary(decision)}\n\n`);
 }
 
 // ---------------------------------------------------------------------------
@@ -1105,4 +967,8 @@ async function main(): Promise<void> {
   }
 }
 
-await main();
+main().catch((error: unknown) => {
+  const message = error instanceof Error ? error.stack ?? error.message : String(error);
+  process.stderr.write(`${message}\n`);
+  process.exitCode = 1;
+});

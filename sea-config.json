@@ -1,0 +1,6 @@
+{
+  "main": ".sea/cli.cjs",
+  "mainFormat": "commonjs",
+  "output": ".sea/ccbudget.blob",
+  "disableExperimentalSEAWarning": true
+}
